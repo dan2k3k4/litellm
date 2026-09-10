@@ -1608,6 +1608,7 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-types",
  "base64 0.22.1",
+ "criterion",
  "indexmap",
  "rand 0.8.7",
  "reqwest",

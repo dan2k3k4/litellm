@@ -1,8 +1,8 @@
-//! Token counting for tokenizers shaped like Anthropic's (optional NFKC
-//! normalizer, `ByteLevel` pre-tokenizer with the GPT-2 split regex, no
-//! post-processor) without running the regex. Oniguruma spends ~90% of
-//! `encode_fast` on `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`;
-//! a hand-written scanner finds the same pieces and hands them to the model.
+//! Exact token counting for a supported tokenizer configuration: optional
+//! NFKC normalization, `ByteLevel` pre-tokenization with the GPT-2 split regex,
+//! and no post-processing. A scanner reproduces the regex's piece boundaries
+//! and hands each piece to the tokenizer's model. Unsupported configurations
+//! and added-token inputs fall back to the full encoder.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -180,6 +180,7 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::seq::SliceRandom;
     use rand::{Rng, SeedableRng};
+    use rstest::{fixture, rstest};
     use tokenizers::normalizers::NFKC;
     use tokenizers::pre_tokenizers::byte_level::ByteLevel;
     use tokenizers::utils::SysRegex;
@@ -190,7 +191,8 @@ mod tests {
 
     use super::*;
 
-    fn anthropic() -> Tokenizer {
+    #[fixture]
+    fn anthropic_tokenizer() -> Tokenizer {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../../litellm/litellm_core_utils/tokenizers/anthropic_tokenizer.json"
@@ -271,36 +273,41 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn anthropic_tokenizer_takes_the_fast_path() {
-        let tokenizer = anthropic();
-        let fast = ByteLevelCounter::detect(&tokenizer).expect("anthropic shape is supported");
+    #[rstest]
+    #[case::plain_text("Hello, how are you today?", true)]
+    #[case::added_token("stop <EOT> here", false)]
+    #[case::normalized_added_token("stop ＜ＥＯＴ＞ here", false)]
+    fn anthropic_tokenizer_takes_the_fast_path(
+        anthropic_tokenizer: Tokenizer,
+        #[case] text: &str,
+        #[case] supported: bool,
+    ) {
+        let fast =
+            ByteLevelCounter::detect(&anthropic_tokenizer).expect("anthropic shape is supported");
         assert!(fast.nfkc);
-        let text = "Hello, how are you today?";
-        assert_eq!(
-            fast.count(&tokenizer, text),
-            Some(reference_count(&tokenizer, text))
-        );
-        assert_eq!(fast.count(&tokenizer, "stop <EOT> here"), None);
-        assert_eq!(fast.count(&tokenizer, "stop ＜ＥＯＴ＞ here"), None);
+        let count = fast.count(&anthropic_tokenizer, text);
+        if supported {
+            assert_eq!(count, Some(reference_count(&anthropic_tokenizer, text)));
+        } else {
+            assert_eq!(count, None);
+        }
     }
 
-    #[test]
-    fn counts_match_the_full_encoder() {
-        let tokenizer = anthropic();
-        let fast = ByteLevelCounter::detect(&tokenizer).expect("supported");
+    #[rstest]
+    fn counts_match_the_full_encoder(anthropic_tokenizer: Tokenizer) {
+        let fast = ByteLevelCounter::detect(&anthropic_tokenizer).expect("supported");
         let mut rng = StdRng::seed_from_u64(2026);
         for _ in 0..4000 {
             let text = random_text(&mut rng);
-            let expected = reference_count(&tokenizer, &text);
+            let expected = reference_count(&anthropic_tokenizer, &text);
             let counted = fast
-                .count(&tokenizer, &text)
-                .unwrap_or_else(|| reference_count(&tokenizer, &text));
+                .count(&anthropic_tokenizer, &text)
+                .unwrap_or_else(|| reference_count(&anthropic_tokenizer, &text));
             assert_eq!(counted, expected, "text {text:?}");
         }
     }
 
-    #[test]
+    #[rstest]
     fn nfkc_matches_the_tokenizer_normalizer_for_every_scalar_value() {
         let fast = ByteLevelCounter { nfkc: true };
         let mut text = String::new();
@@ -318,7 +325,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn nfkc_matches_the_tokenizer_normalizer_on_random_texts() {
         let fast = ByteLevelCounter { nfkc: true };
         let mut rng = StdRng::seed_from_u64(11);
@@ -330,7 +337,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn pieces_match_the_byte_level_pre_tokenizer() {
         let byte_level = ByteLevel::new(false, true, true);
         let mut rng = StdRng::seed_from_u64(7);
@@ -358,7 +365,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn byte_chars_match_the_byte_level_alphabet() {
         let byte_level = ByteLevel::new(false, false, false);
         let characters: Vec<char> = (0..=0x10FFFFu32).filter_map(char::from_u32).collect();
@@ -384,7 +391,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn classes_match_oniguruma() {
         let letter = SysRegex::new(r"\p{L}").expect("regex");
         let number = SysRegex::new(r"\p{N}").expect("regex");
@@ -408,10 +415,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn other_tokenizer_shapes_are_declined() {
-        let mut tokenizer = anthropic();
-        tokenizer.with_pre_tokenizer(Some(ByteLevel::new(true, true, true)));
-        assert!(ByteLevelCounter::detect(&tokenizer).is_none());
+    #[rstest]
+    fn other_tokenizer_shapes_are_declined(mut anthropic_tokenizer: Tokenizer) {
+        anthropic_tokenizer.with_pre_tokenizer(Some(ByteLevel::new(true, true, true)));
+        assert!(ByteLevelCounter::detect(&anthropic_tokenizer).is_none());
     }
 }

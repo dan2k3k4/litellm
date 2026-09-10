@@ -40,6 +40,11 @@ bedrock-auth = [
 observability = ["dep:tracing-subscriber"]
 
 [dev-dependencies]
+criterion.workspace = true
 rstest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true
+
+[[bench]]
+name = "token_counter"
+harness = false
