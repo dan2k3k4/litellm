@@ -153,6 +153,33 @@ locals {
     [local.backend_launch_cmd],
   ))
 
+  spend_worker_address = "tcp://127.0.0.1:${var.spend_worker_port}"
+  spend_worker_env_kv = var.spend_worker_enabled ? [
+    { name = "LITELLM_SPEND_WORKER_ENABLED", value = "true" },
+    { name = "LITELLM_SPEND_WORKER_ADDRESS", value = local.spend_worker_address },
+    { name = "LITELLM_SPEND_WORKER_BUFFER_SIZE", value = tostring(var.spend_worker_buffer_size) },
+    { name = "LITELLM_SPEND_WORKER_ON_UNAVAILABLE", value = var.spend_worker_on_unavailable },
+    { name = "LITELLM_SPEND_WORKER_DRAIN_TIMEOUT_SECONDS", value = tostring(var.spend_worker_drain_timeout_seconds) },
+  ] : []
+
+  gateway_env_kv      = concat(local.shared_env_kv, local.gateway_otel_env_kv, local.billing_metrics_env_kv, local.gateway_extra_env_kv, local.proxy_config_env, local.spend_worker_env_kv)
+  gateway_env_secrets = concat(local.shared_env_secrets, local.otel_env_secrets, local.billing_metrics_env_secrets, local.gateway_extra_secret_kv)
+
+  spend_worker_env_kv_all = concat(
+    local.shared_env_kv,
+    local.gateway_extra_env_kv,
+    local.proxy_config_env,
+    local.spend_worker_env_kv,
+    [{ name = "LITELLM_JOB_ROLE", value = "spend_worker" }],
+  )
+  spend_worker_env_secrets = concat(local.shared_env_secrets, local.gateway_extra_secret_kv)
+
+  spend_worker_args = join(" && ", concat(
+    local.redis_ca_fragment,
+    local.database_url_fragment,
+    ["exec python -m gateway.spend_worker"],
+  ))
+
   # Env shipped to the migrations Job. The migrations image runs run.py
   # which assembles DATABASE_URL from these discrete vars itself, so we
   # only need writer-side DB env (no read replica, no proxy_config, no
@@ -216,6 +243,7 @@ resource "google_cloud_run_v2_service" "gateway" {
     }
 
     containers {
+      name    = "gateway"
       image   = local.gateway_image
       command = ["sh", "-c"]
       args    = [local.gateway_args]
@@ -232,7 +260,7 @@ resource "google_cloud_run_v2_service" "gateway" {
       }
 
       dynamic "env" {
-        for_each = concat(local.shared_env_kv, local.gateway_otel_env_kv, local.billing_metrics_env_kv, local.gateway_extra_env_kv, local.proxy_config_env)
+        for_each = local.gateway_env_kv
         content {
           name  = env.value.name
           value = env.value.value
@@ -240,7 +268,7 @@ resource "google_cloud_run_v2_service" "gateway" {
       }
 
       dynamic "env" {
-        for_each = concat(local.shared_env_secrets, local.otel_env_secrets, local.billing_metrics_env_secrets, local.gateway_extra_secret_kv)
+        for_each = local.gateway_env_secrets
         content {
           name = env.value.name
           value_source {
@@ -278,6 +306,52 @@ resource "google_cloud_run_v2_service" "gateway" {
         }
         period_seconds  = 30
         timeout_seconds = 5
+      }
+    }
+
+    dynamic "containers" {
+      for_each = var.spend_worker_enabled ? [1] : []
+      content {
+        name    = "spend-worker"
+        image   = local.gateway_image
+        command = ["sh", "-c"]
+        args    = [local.spend_worker_args]
+
+        resources {
+          limits = {
+            cpu    = var.spend_worker_cpu
+            memory = var.spend_worker_memory
+          }
+        }
+
+        dynamic "env" {
+          for_each = local.spend_worker_env_kv_all
+          content {
+            name  = env.value.name
+            value = env.value.value
+          }
+        }
+
+        dynamic "env" {
+          for_each = local.spend_worker_env_secrets
+          content {
+            name = env.value.name
+            value_source {
+              secret_key_ref {
+                secret  = env.value.secret
+                version = env.value.version
+              }
+            }
+          }
+        }
+
+        dynamic "volume_mounts" {
+          for_each = local.proxy_config_enabled ? [1] : []
+          content {
+            name       = local.proxy_config_volume
+            mount_path = local.proxy_config_mount_path
+          }
+        }
       }
     }
 

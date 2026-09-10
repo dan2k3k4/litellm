@@ -233,6 +233,59 @@ locals {
       "${local.proxy_config_fetch_cmd} && ${local.backend_launch_cmd}"
     ]
   } : {}
+
+  spend_worker_address = "tcp://127.0.0.1:${var.spend_worker_port}"
+  spend_worker_env = var.spend_worker_enabled ? [
+    { name = "LITELLM_SPEND_WORKER_ENABLED", value = "true" },
+    { name = "LITELLM_SPEND_WORKER_ADDRESS", value = local.spend_worker_address },
+    { name = "LITELLM_SPEND_WORKER_BUFFER_SIZE", value = tostring(var.spend_worker_buffer_size) },
+    { name = "LITELLM_SPEND_WORKER_ON_UNAVAILABLE", value = var.spend_worker_on_unavailable },
+    { name = "LITELLM_SPEND_WORKER_DRAIN_TIMEOUT_SECONDS", value = tostring(var.spend_worker_drain_timeout_seconds) },
+  ] : []
+
+  gateway_environment = concat(
+    local.shared_env,
+    local.gateway_otel_env,
+    local.billing_metrics_env,
+    local.gateway_extra_env_list,
+    local.proxy_config_env,
+    local.spend_worker_env,
+  )
+
+  spend_worker_launch_cmd = "exec python -m gateway.spend_worker"
+  spend_worker_command = [
+    local.proxy_config_enabled ? "${local.proxy_config_fetch_cmd} && ${local.spend_worker_launch_cmd}" : local.spend_worker_launch_cmd
+  ]
+
+  spend_worker_container = var.spend_worker_enabled ? [{
+    name      = "spend-worker"
+    image     = var.gateway_image
+    essential = false
+    cpu       = var.spend_worker_cpu
+    memory    = var.spend_worker_memory
+
+    restartPolicy = { enabled = true }
+
+    entryPoint = ["sh", "-c"]
+    command    = local.spend_worker_command
+    environment = concat(
+      local.shared_env,
+      local.gateway_extra_env_list,
+      local.proxy_config_env,
+      local.spend_worker_env,
+      [{ name = "LITELLM_JOB_ROLE", value = "spend_worker" }],
+    )
+    secrets = concat(local.shared_secrets, local.gateway_extra_secrets_list)
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.gateway.name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "spend-worker"
+      }
+    }
+  }] : []
 }
 
 # ---------- Gateway ----------
@@ -259,6 +312,10 @@ resource "aws_ecs_task_definition" "gateway" {
       )
       error_message = "billing_metrics_client_cert_pem and billing_metrics_client_key_pem are both required when billing_metrics_endpoint is set."
     }
+    precondition {
+      condition     = !var.spend_worker_enabled || (var.spend_worker_cpu < var.gateway_cpu && var.spend_worker_memory < var.gateway_memory)
+      error_message = "spend_worker_cpu and spend_worker_memory are carved out of gateway_cpu / gateway_memory and must leave room for the gateway container."
+    }
   }
 
   family                   = "${local.name}-gateway"
@@ -269,7 +326,7 @@ resource "aws_ecs_task_definition" "gateway" {
   execution_role_arn       = aws_iam_role.task_execution.arn
   task_role_arn            = aws_iam_role.task.arn
 
-  container_definitions = jsonencode([
+  container_definitions = jsonencode(concat([
     merge(
       {
         name      = "gateway"
@@ -277,14 +334,8 @@ resource "aws_ecs_task_definition" "gateway" {
         essential = true
 
         portMappings = [{ containerPort = 4000, protocol = "tcp" }]
-        environment = concat(
-          local.shared_env,
-          local.gateway_otel_env,
-          local.billing_metrics_env,
-          local.gateway_extra_env_list,
-          local.proxy_config_env,
-        )
-        secrets = concat(local.shared_secrets, local.gateway_extra_secrets_list)
+        environment  = local.gateway_environment
+        secrets      = concat(local.shared_secrets, local.gateway_extra_secrets_list)
 
         # Container-level healthCheck intentionally omitted — the wolfi
         # runtime image doesn't ship curl/wget. The ALB target group polls
@@ -301,7 +352,7 @@ resource "aws_ecs_task_definition" "gateway" {
       },
       local.gateway_proxy_overrides,
     )
-  ])
+  ], local.spend_worker_container))
 
   tags = local.tags
 }
