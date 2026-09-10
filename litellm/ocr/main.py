@@ -25,6 +25,7 @@ from litellm.llms.azure_ai.ocr.common_utils import (
 )
 from litellm.llms.base_llm.ocr.transformation import (
     OCR_REQUEST_FORMAT_PARAM,
+    PROVIDER_NATIVE_RESPONSE_KEY,
     BaseOCRConfig,
     OCRResponse,
     parse_ocr_request_format,
@@ -219,7 +220,7 @@ def _rust_ocr_provider(request: rust_ocr_bridge.LiteLLMOcrRequest) -> str | None
 
 def _rust_ocr_supported(request: rust_ocr_bridge.LiteLLMOcrRequest) -> bool:
     provider: Final = _rust_ocr_provider(request)
-    if provider not in _RUST_OCR_PROVIDERS or request.kwargs.get(OCR_REQUEST_FORMAT_PARAM) == "native":
+    if provider not in _RUST_OCR_PROVIDERS:
         return False
     if provider == "azure_ai":
         return (
@@ -229,6 +230,16 @@ def _rust_ocr_supported(request: rust_ocr_bridge.LiteLLMOcrRequest) -> bool:
             and request.kwargs.get("azure_password") is None
         )
     return True
+
+
+def _rust_ocr_response(response: Mapping[str, object]) -> OCRResponse:
+    provider_native_response: Final = response.get(PROVIDER_NATIVE_RESPONSE_KEY)
+    normalized: Final = OCRResponse.model_validate(
+        {key: value for key, value in response.items() if key != PROVIDER_NATIVE_RESPONSE_KEY}
+    )
+    if isinstance(provider_native_response, Mapping):
+        normalized.set_provider_native_response(provider_native_response)
+    return normalized
 
 
 def _rust_bridge_optional_params(
@@ -394,7 +405,7 @@ def _run_rust_ocr(
         )
     except Exception as error:
         raise _map_rust_ocr_error(error, request, native_exception_types()) from error
-    return OCRResponse.model_validate(response) if response is not None else None
+    return _rust_ocr_response(response) if response is not None else None
 
 
 async def _run_rust_aocr(
@@ -419,7 +430,7 @@ async def _run_rust_aocr(
         )
     except Exception as error:
         raise _map_rust_ocr_error(error, request, native_exception_types()) from error
-    return OCRResponse.model_validate(response) if response is not None else None
+    return _rust_ocr_response(response) if response is not None else None
 
 
 @client
