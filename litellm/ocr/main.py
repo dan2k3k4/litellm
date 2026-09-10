@@ -270,10 +270,16 @@ def _rust_bridge_optional_params(
         or resolve_secret("VERTEXAI_LOCATION")
         or resolve_secret("VERTEX_LOCATION")
     )
+    credentials: Final = (
+        request.kwargs.get("vertex_credentials")
+        or request.kwargs.get("vertex_ai_credentials")
+        or resolve_secret("VERTEXAI_CREDENTIALS")
+    )
     return {
         **optional_params,
         **({"vertex_project": project} if project is not None else {}),
         **({"vertex_location": location} if location is not None else {}),
+        **({"vertex_credentials": credentials} if credentials is not None else {}),
     }
 
 
