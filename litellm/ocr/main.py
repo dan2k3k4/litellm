@@ -10,6 +10,7 @@ import re
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass
 from io import IOBase
+from types import MappingProxyType
 from typing import Any, Final, cast
 
 import httpx
@@ -75,6 +76,9 @@ _RUST_OCR_CONFIG_FIELDS: Final = frozenset(
         "vertex_location",
         "vertex_ai_location",
     }
+)
+_RUST_OCR_SECRET_FIELDS: Final = frozenset(
+    {"azure_ad_token", "client_secret", "azure_federated_token_file", "vertex_credentials", "vertex_ai_credentials"}
 )
 
 
@@ -235,7 +239,7 @@ def _rust_bridge_optional_params(
         name: value
         for name, value in request.kwargs.items()
         if (name not in GenericLiteLLMParams.model_fields or name in _RUST_OCR_CONFIG_FIELDS)
-        and name not in {"litellm_logging_obj", "aocr", "litellm_call_id"}
+        and name not in {"litellm_logging_obj", "aocr", "litellm_call_id", "proxy_server_request"}
     }
     provider: Final = _rust_ocr_provider(request)
     if provider == "azure_ai" and litellm.enable_azure_ad_token_refresh is True:
@@ -262,6 +266,29 @@ def _rust_bridge_optional_params(
     }
 
 
+def _rust_bridge_input_sources(
+    request: rust_ocr_bridge.LiteLLMOcrRequest,
+    optional_params: Mapping[str, object],
+) -> Mapping[str, str]:
+    proxy_request: Final = request.kwargs.get("proxy_server_request")
+    if not isinstance(proxy_request, Mapping):
+        return MappingProxyType({})
+    proxy_request_mapping: Final = cast(  # cast-ok: runtime Mapping check loses generic key and value types
+        Mapping[object, object], proxy_request
+    )
+    body_value: Final = proxy_request_mapping.get("body")
+    if not isinstance(body_value, Mapping):
+        return MappingProxyType({})
+    body: Final = cast(  # cast-ok: runtime Mapping check loses generic key and value types
+        Mapping[object, object], body_value
+    )
+    names: Final = frozenset(optional_params) | frozenset({"api_key", "api_base", "extra_headers"})
+    request_sources: Final = MappingProxyType({name: "request" for name in names if name in body})
+    if litellm.enable_azure_ad_token_refresh is True and "enable_azure_ad_token_refresh" in optional_params:
+        return MappingProxyType({**request_sources, "enable_azure_ad_token_refresh": "deployment"})
+    return request_sources
+
+
 def _marshal_rust_ocr_request(
     request: rust_ocr_bridge.LiteLLMOcrRequest,
     resolve_secret: Callable[[str], str | None],
@@ -276,13 +303,24 @@ def _marshal_rust_ocr_request(
     provider: Final = _rust_ocr_provider(request)
     api_key: Final = request.api_key or resolve_secret("MISTRAL_API_KEY") if provider == "mistral" else request.api_key
     optional_params: Final = _rust_bridge_optional_params(request, resolve_secret)
+    input_sources: Final = _rust_bridge_input_sources(request, optional_params)
+    logged_optional_params: Final = MappingProxyType(
+        {name: "****" if name in _RUST_OCR_SECRET_FIELDS else value for name, value in optional_params.items()}
+    )
+    logged_kwargs: Final = MappingProxyType(
+        {
+            name: "****" if name in _RUST_OCR_SECRET_FIELDS else value
+            for name, value in request.kwargs.items()
+            if name != "proxy_server_request"
+        }
+    )
     logging_obj: Final = cast(  # cast-ok: bridge kwargs carry the prepared logging object
         LiteLLMLoggingObj, request.kwargs["litellm_logging_obj"]
     )
     logging_obj.update_from_kwargs(
-        kwargs=dict(request.kwargs),
+        kwargs=dict(logged_kwargs),  # mutable-ok: logging API requires an owned dict
         model=request.model,
-        optional_params=optional_params,
+        optional_params=dict(logged_optional_params),  # mutable-ok: logging API requires an owned dict
         litellm_params={"litellm_call_id": request.kwargs.get("litellm_call_id"), "api_base": request.api_base},
         custom_llm_provider=provider,
     )
@@ -290,7 +328,7 @@ def _marshal_rust_ocr_request(
         input="OCR document processing",
         api_key=api_key,
         additional_args={
-            "complete_input_dict": {"model": request.model, "document": document, **optional_params},
+            "complete_input_dict": {"model": request.model, "document": document, **logged_optional_params},
             "api_base": request.api_base or "",
             "headers": request.extra_headers or {},
         },
@@ -304,6 +342,7 @@ def _marshal_rust_ocr_request(
         custom_llm_provider=request.custom_llm_provider,
         extra_headers=request.extra_headers,
         kwargs=optional_params,
+        input_sources=input_sources,
     )
 
 
@@ -340,6 +379,7 @@ def _run_rust_ocr(
     if rust_ocr_bridge.load_rust_ocr() is None:
         return None
     marshalled: Final = _marshal_rust_ocr_request(request, resolve_api_key)
+    input_sources: Final = marshalled.input_sources
     try:
         response: Final = rust_ocr_bridge.ocr(
             model=marshalled.model,
@@ -349,6 +389,7 @@ def _run_rust_ocr(
             custom_llm_provider=marshalled.custom_llm_provider,
             extra_headers=marshalled.extra_headers,
             optional_params=dict(marshalled.kwargs),
+            input_sources=input_sources,
             timeout=marshalled.timeout,
         )
     except Exception as error:
@@ -363,6 +404,7 @@ async def _run_rust_aocr(
     if rust_ocr_bridge.load_rust_aocr() is None:
         return None
     marshalled: Final = _marshal_rust_ocr_request(request, resolve_api_key)
+    input_sources: Final = marshalled.input_sources
     try:
         response: Final = await rust_ocr_bridge.aocr(
             model=marshalled.model,
@@ -372,6 +414,7 @@ async def _run_rust_aocr(
             custom_llm_provider=marshalled.custom_llm_provider,
             extra_headers=marshalled.extra_headers,
             optional_params=dict(marshalled.kwargs),
+            input_sources=input_sources,
             timeout=marshalled.timeout,
         )
     except Exception as error:

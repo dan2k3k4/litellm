@@ -23,6 +23,12 @@ fn prepare_ocr(
         timeout_seconds: inputs.timeout_seconds,
     })?;
     let optional_params = object_or_empty("optional_params", inputs.optional_params)?;
+    let input_sources = inputs
+        .input_sources
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
+        .unwrap_or_default();
 
     Ok(async move {
         let RouteOptions {
@@ -48,6 +54,7 @@ fn prepare_ocr(
                 custom_llm_provider,
                 extra_headers,
                 optional_params,
+                input_sources,
                 timeout_seconds: timeout.map(|value| value.as_secs_f64()),
             })?;
             return crate::transport::ocr_client()?
@@ -90,6 +97,8 @@ bridge_route! {
         extra_headers: Option<serde_json::Value>,
         #[pyo3(from_py_with = litellm_python_interop::from_py)]
         optional_params: Option<serde_json::Value>,
+        #[pyo3(from_py_with = litellm_python_interop::from_py)]
+        input_sources: Option<serde_json::Value>,
         timeout_seconds: Option<f64>,
     },
     prepare = prepare_ocr,

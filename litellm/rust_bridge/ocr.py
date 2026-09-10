@@ -22,6 +22,7 @@ class LiteLLMOcrRequest:
     custom_llm_provider: str | None
     extra_headers: dict[str, object] | None
     kwargs: Mapping[str, object]
+    input_sources: Mapping[str, str] | None = None
 
 
 class RustOcr(Protocol):
@@ -34,6 +35,7 @@ class RustOcr(Protocol):
         custom_llm_provider: str | None,
         extra_headers: dict[str, object] | None,
         optional_params: dict[str, object],
+        input_sources: dict[str, str],
         timeout_seconds: float | None,
     ) -> dict[str, object]:
         raise NotImplementedError
@@ -49,6 +51,7 @@ class RustAocr(Protocol):
         custom_llm_provider: str | None,
         extra_headers: dict[str, object] | None,
         optional_params: dict[str, object],
+        input_sources: dict[str, str],
         timeout_seconds: float | None,
     ) -> Awaitable[dict[str, object]]:
         raise NotImplementedError
@@ -84,6 +87,7 @@ def ocr(
     extra_headers: dict[str, object] | None,
     optional_params: dict[str, object],
     timeout: float | httpx.Timeout | None,
+    input_sources: Mapping[str, str] | None = None,
 ) -> dict[str, object] | None:
     rust_ocr: Final = load_rust_ocr()
     if rust_ocr is None:
@@ -96,6 +100,7 @@ def ocr(
         custom_llm_provider=custom_llm_provider,
         extra_headers=extra_headers,
         optional_params=optional_params,
+        input_sources=dict(input_sources or {}),  # mutable-ok: native boundary requires a concrete dict
         timeout_seconds=_timeout_to_seconds(timeout),
     )
 
@@ -110,6 +115,7 @@ async def aocr(
     extra_headers: dict[str, object] | None,
     optional_params: dict[str, object],
     timeout: float | httpx.Timeout | None,
+    input_sources: Mapping[str, str] | None = None,
 ) -> dict[str, object] | None:
     rust_aocr: Final = load_rust_aocr()
     if rust_aocr is None:
@@ -122,5 +128,6 @@ async def aocr(
         custom_llm_provider=custom_llm_provider,
         extra_headers=extra_headers,
         optional_params=optional_params,
+        input_sources=dict(input_sources or {}),  # mutable-ok: native boundary requires a concrete dict
         timeout_seconds=_timeout_to_seconds(timeout),
     )

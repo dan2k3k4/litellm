@@ -58,6 +58,7 @@ class RecordingBridge:
         custom_llm_provider: str | None,
         extra_headers: dict[str, object] | None,
         optional_params: dict[str, object],
+        input_sources: dict[str, str],
         timeout_seconds: float | None,
     ) -> dict[str, object]:
         self.calls.append(
@@ -69,6 +70,7 @@ class RecordingBridge:
                 "custom_llm_provider": custom_llm_provider,
                 "extra_headers": extra_headers,
                 "optional_params": optional_params,
+                "input_sources": input_sources,
                 "timeout_seconds": timeout_seconds,
             }
         )
@@ -90,6 +92,7 @@ class RecordingAsyncBridge:
         custom_llm_provider: str | None,
         extra_headers: dict[str, object] | None,
         optional_params: dict[str, object],
+        input_sources: dict[str, str],
         timeout_seconds: float | None,
     ) -> dict[str, object]:
         self.calls.append(
@@ -101,6 +104,7 @@ class RecordingAsyncBridge:
                 "custom_llm_provider": custom_llm_provider,
                 "extra_headers": extra_headers,
                 "optional_params": optional_params,
+                "input_sources": input_sources,
                 "timeout_seconds": timeout_seconds,
             }
         )
@@ -117,6 +121,7 @@ class RaisingBridge:
         custom_llm_provider: str | None,
         extra_headers: dict[str, object] | None,
         optional_params: dict[str, object],
+        input_sources: dict[str, str],
         timeout_seconds: float | None,
     ) -> dict[str, object]:
         raise RuntimeError("bridge failed")
@@ -132,6 +137,7 @@ class RaisingAsyncBridge:
         custom_llm_provider: str | None,
         extra_headers: dict[str, object] | None,
         optional_params: dict[str, object],
+        input_sources: dict[str, str],
         timeout_seconds: float | None,
     ) -> dict[str, object]:
         raise RuntimeError("bridge failed")
@@ -393,6 +399,7 @@ def test_bridge_wrapper_forwards_prepared_args_and_wraps_response():
             "x-trace-id": "trace-1",
         },
         "optional_params": {"include_image_base64": True, "pages": [0]},
+        "input_sources": {},
         "timeout_seconds": 12.5,
     }
 
@@ -424,6 +431,7 @@ async def test_bridge_wrapper_forwards_prepared_async_args_and_wraps_response():
         "custom_llm_provider": "vertex_ai",
         "extra_headers": None,
         "optional_params": {"vertex_project": "project-1"},
+        "input_sources": {},
         "timeout_seconds": 42.0,
     }
 
@@ -457,6 +465,7 @@ def test_run_rust_ocr_prepares_request_and_wraps_response():
             "x-trace-id": "trace-1",
         },
         "optional_params": {"include_image_base64": True},
+        "input_sources": {},
         "timeout_seconds": 12.5,
     }
 
@@ -662,6 +671,69 @@ def test_prepare_rust_ocr_call_forwards_raw_azure_auth_inputs():
         "azure_credential": "ClientSecretCredential",
         "azure_federated_token_file": "/token",
     }
+    assert call["input_sources"] == {}
+
+
+def test_prepare_rust_ocr_call_preserves_proxy_input_sources():
+    bridge = RecordingBridge()
+    litellm.rust(True)
+    rust_bridge._OCR.override(bridge)
+    request_values = {
+        "tenant_id": "tenant",
+        "client_id": "client",
+        "client_secret": "secret",
+        "azure_authority_host": "https://login.example.com",
+        "api_base": "https://azure.example.com",
+    }
+
+    ocr_main._run_rust_ocr(
+        request=build_request(
+            custom_llm_provider="azure_ai",
+            model="pixtral-12b-2409",
+            api_key=None,
+            api_base="https://azure.example.com",
+            litellm_params={
+                "tenant_id": "tenant",
+                "client_id": "client",
+                "client_secret": "secret",
+                "azure_authority_host": "https://login.example.com",
+                "proxy_server_request": {"body": request_values},
+            },
+        ),
+        resolve_api_key=lambda _name: None,
+    )
+
+    assert bridge.calls[0]["input_sources"] == {name: "request" for name in request_values}
+
+
+def test_rust_ocr_logging_redacts_azure_credentials():
+    bridge = RecordingBridge()
+    logging_obj = RecordingLogging()
+    litellm.rust(True)
+    rust_bridge._OCR.override(bridge)
+
+    ocr_main._run_rust_ocr(
+        request=build_request(
+            logging_obj=logging_obj,
+            custom_llm_provider="azure_ai",
+            model="pixtral-12b-2409",
+            api_key=None,
+            litellm_params={"azure_ad_token": "token", "client_secret": "secret"},
+        ),
+        resolve_api_key=lambda _name: None,
+    )
+
+    assert logging_obj.update_kwargs["optional_params"] == {
+        "azure_ad_token": "****",
+        "client_secret": "****",
+    }
+    assert logging_obj.pre_call_kwargs is not None
+    additional_args = logging_obj.pre_call_kwargs["additional_args"]
+    assert isinstance(additional_args, dict)
+    complete_input = additional_args["complete_input_dict"]
+    assert isinstance(complete_input, dict)
+    assert complete_input["azure_ad_token"] == "****"
+    assert complete_input["client_secret"] == "****"
 
 
 def test_rust_eligibility_rejects_python_only_azure_auth_modes():
@@ -691,12 +763,14 @@ def test_prepare_rust_ocr_call_forwards_global_azure_refresh(monkeypatch: pytest
             model="pixtral-12b-2409",
             api_key=None,
             api_base="https://azure.example.com",
+            litellm_params={"proxy_server_request": {"body": {"enable_azure_ad_token_refresh": True}}},
             timeout=None,
         ),
         resolve_api_key=lambda _name: None,
     )
 
     assert bridge.calls[0]["optional_params"] == {"enable_azure_ad_token_refresh": True}
+    assert bridge.calls[0]["input_sources"] == {"enable_azure_ad_token_refresh": "deployment"}
 
 
 def test_run_rust_ocr_runs_pre_call_logging():
