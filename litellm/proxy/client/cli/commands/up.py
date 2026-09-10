@@ -25,6 +25,7 @@ from .claude_settings import (
     CLAUDE_SETTINGS_PATH,
     ApiKeyHelper,
     ClaudeSettingsError,
+    install_statusline_script,
     load_json_or_empty,
     merge_claude_settings,
     resolve_api_key_helper,
@@ -181,6 +182,7 @@ def up(ctx: click.Context) -> None:
             )
 
         api_key_helper: Final = resolve_api_key_helper(base_url)
+        status_line: Final = install_statusline_script()
         original_existed: Final = CLAUDE_SETTINGS_PATH.exists()
         original_settings: Final = load_json_or_empty(CLAUDE_SETTINGS_PATH)
         write_backup(
@@ -191,7 +193,9 @@ def up(ctx: click.Context) -> None:
         )
 
         CLAUDE_SETTINGS_PATH.parent.mkdir(exist_ok=True)
-        merged: Final = merge_claude_settings(original_settings, base_url, ApiKeyHelper(api_key_helper))
+        merged: Final = merge_claude_settings(
+            original_settings, base_url, ApiKeyHelper(api_key_helper), status_line=status_line
+        )
         with open(CLAUDE_SETTINGS_PATH, "w") as f:
             json.dump(merged, f, indent=2)
     except (AgentRunError, ClaudeSettingsError) as e:

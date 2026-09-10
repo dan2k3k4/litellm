@@ -34,6 +34,14 @@ if TYPE_CHECKING:
 CACHE_TTL_5M_SECONDS: Final = 300
 CACHE_TTL_1H_SECONDS: Final = 3600
 
+AUTOROUTER_SESSION_SQL: Final = """
+SELECT router_name, router_type, turns, last_model, spend, saved_spend
+FROM "LiteLLM_AutoRouterSession"
+WHERE api_key = $1 AND session_id = $2
+ORDER BY last_turn_at DESC
+LIMIT 1
+"""
+
 AUTOROUTER_BENCHMARKS_SQL: Final = """
 WITH windowed AS (
     SELECT * FROM "LiteLLM_AutoRouterSession"
@@ -168,7 +176,7 @@ def _write_ttl_seconds(usage_object: Mapping[str, object] | None) -> int | None:
 SESSION_ID_MAX_CHARS: Final = 256
 
 
-def _bounded_session_id(session_id: str) -> str:
+def bounded_session_id(session_id: str) -> str:
     """The session id as stored, bounded so a caller-chosen identifier cannot exceed
     Postgres's B-tree index entry limit through the composite primary key. Oversized
     ids map to a stable digest, so their turns still aggregate into one session."""
@@ -219,7 +227,7 @@ def build_autorouter_turn_transaction(
     classifier_cost: Final = classifier_cost_from_decision(routing_decision)
     return AutoRouterTurnTransaction(
         api_key=api_key,
-        session_id=_bounded_session_id(session_id),
+        session_id=bounded_session_id(session_id),
         router_name=router_name,
         router_type=str(routing_decision.get("router_type") or "unknown"),
         tier=tier_raw if isinstance(tier_raw, str) and tier_raw else None,

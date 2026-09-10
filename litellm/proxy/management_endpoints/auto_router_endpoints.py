@@ -32,7 +32,11 @@ from litellm.proxy.auth.auth_checks import (
     can_key_call_resolved_model,
 )
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
-from litellm.proxy.db.autorouter_session_rollup import AUTOROUTER_BENCHMARKS_SQL
+from litellm.proxy.db.autorouter_session_rollup import (
+    AUTOROUTER_BENCHMARKS_SQL,
+    AUTOROUTER_SESSION_SQL,
+    bounded_session_id,
+)
 from litellm.proxy.litellm_pre_call_utils import (
     LiteLLMProxyRequestSetup,
     refresh_proxy_server_request_body_snapshot,
@@ -54,6 +58,7 @@ from litellm.types.management_endpoints.auto_router_endpoints import (
     AutoRouterCacheStats,
     AutoRouterRoutingTestRequest,
     AutoRouterRoutingTestResponse,
+    AutoRouterSessionResponse,
     ComplexityRouterConfigValidationRequest,
     ComplexityRouterConfigValidationResponse,
     RequestComplexityRouterConfig,
@@ -701,6 +706,85 @@ async def get_auto_router_benchmarks(
         routers_in_scope=len(groups),
         totals=_benchmark_totals(_summed_agg_row(rows)),
         groups=groups,
+    )
+
+
+class _SessionRow(BaseModel):
+    router_name: str
+    router_type: str
+    turns: int
+    last_model: str
+    spend: float
+    saved_spend: float
+
+
+_SESSION_ROWS: Final = TypeAdapter(list[_SessionRow])
+
+
+def _savings_baseline_model(llm_router: "Router | None", router_name: str) -> str | None:
+    """The baseline the named router prices its savings against, from the live registry.
+
+    The rollup row records money, not the counterfactual's name: every turn's spend log carries
+    `routing_decision.savings_baseline_model`, and the router derives it once from its own tier
+    ladder, so the registry is the one owner to ask rather than a new column to keep in step.
+    """
+    if llm_router is None:
+        return None
+    return next(
+        (
+            baseline.model
+            for tagged in llm_router.complexity_routers.get(router_name, ())
+            if (baseline := tagged.strategy.savings_baseline) is not None
+        ),
+        None,
+    )
+
+
+@router.get(
+    "/auto_router/session",
+    tags=("auto router",),
+    dependencies=(Depends(user_api_key_auth),),
+    response_model=AutoRouterSessionResponse,
+)
+async def get_auto_router_session(
+    user_api_key_dict: Annotated[UserAPIKeyAuth, Depends(user_api_key_auth)],
+    session_id: Annotated[
+        str, Query(description="The client session id (x-*-session-id header) the turns were sent under")
+    ],
+) -> AutoRouterSessionResponse:
+    """
+    One auto-routed session, for the key that ran it: the model its last turn was routed to and the
+    session's spend against the router's savings baseline. Built for a coding agent's status line
+    or stop hook, so any virtual key may call it and only ever sees rows written under its own
+    key hash. Reads the LiteLLM_AutoRouterSession rollup, which the asynchronous spend flush
+    fills a moment after each turn; a session with no flushed auto-routed turn yet is a 404. The
+    id is bounded the way the writer bounded it, so an oversized client id still finds its row.
+    """
+    from litellm.proxy.proxy_server import llm_router, prisma_client
+
+    if prisma_client is None:
+        raise HTTPException(status_code=500, detail=CommonProxyErrors.db_not_connected_error.value)
+    rows: Final = _SESSION_ROWS.validate_python(
+        await _query_raw(
+            prisma_client, AUTOROUTER_SESSION_SQL, user_api_key_dict.api_key, bounded_session_id(session_id)
+        )
+        or ()
+    )
+    if not rows:
+        raise HTTPException(
+            status_code=404, detail=f"No auto-routed turns recorded for session {session_id!r} under this key"
+        )
+    row: Final = rows[0]
+    return AutoRouterSessionResponse(
+        session_id=session_id,
+        router_name=row.router_name,
+        router_type=row.router_type,
+        turns=row.turns,
+        last_model=row.last_model,
+        spend=row.spend,
+        saved_spend=row.saved_spend,
+        baseline_spend=row.spend + row.saved_spend,
+        baseline_model=_savings_baseline_model(llm_router, row.router_name),
     )
 
 

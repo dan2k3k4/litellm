@@ -3826,3 +3826,28 @@ def test_team_disable_logging_stays_proxy_admin_only():
 def test_neighbouring_team_routes_stay_closed(route):
     """The grant is the callback paths and nothing else on the team namespace."""
     assert "Only proxy admin" in _gate(route, LitellmUserRoles.INTERNAL_USER.value)
+
+
+@pytest.mark.parametrize("user_role", [None, LitellmUserRoles.INTERNAL_USER.value, LitellmUserRoles.INTERNAL_USER_VIEW_ONLY.value])
+def test_auto_router_session_is_reachable_by_any_key_but_benchmarks_stays_admin_only(user_role):
+    valid_token = UserAPIKeyAuth(api_key="hash-of-caller", user_role=user_role)
+    request = MagicMock(spec=Request)
+    request.query_params = {"session_id": "sess-1"}
+
+    RouteChecks.non_proxy_admin_allowed_routes_check(
+        user_obj=None,
+        _user_role=user_role,
+        route="/auto_router/session",
+        request=request,
+        valid_token=valid_token,
+        request_data={},
+    )
+    with pytest.raises(Exception, match="Only proxy admin"):
+        RouteChecks.non_proxy_admin_allowed_routes_check(
+            user_obj=None,
+            _user_role=user_role,
+            route="/auto_router/benchmarks",
+            request=request,
+            valid_token=valid_token,
+            request_data={},
+        )

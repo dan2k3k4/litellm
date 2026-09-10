@@ -554,6 +554,20 @@ Plain `lite configure`, with no agent named, asks the same things interactively:
 
 What the command changed is recorded in `~/.litellm/claude_configure_state.json` (previous values plus fingerprints of what was written, never a second copy of the key). `lite unconfigure claude` restores each of those keys only if it still holds what `configure` wrote, so anything you changed since is left alone and named in the output; a `settings.json` or `env` object that only existed because of `configure` is removed again. Ownership moves only by a write: running `configure` again (a re-login is one) refreshes the record only for the keys its merge changed, keeps the original snapshot of a key that still holds what it wrote, and snapshots afresh a key you changed in between, so `unconfigure` brings back whatever the repeat displaced and never adopts your edit as its own. A credential (`env.ANTHROPIC_API_KEY`, `env.ANTHROPIC_AUTH_TOKEN`, `apiKeyHelper`) is put back only when the restored file points at the `ANTHROPIC_BASE_URL` it was captured next to; otherwise it stays removed, the output says which server it belonged to, and the receipt is kept so pointing the URL back and running `unconfigure` again finishes the job. It also undoes `lite login --config-claude`, which writes through the same path. Like `--config-claude`, both refuse to run while a `lite up` or `lite autoroute up` session holds a backup, and that check comes before any login prompt or request
 
+#### Routed model and savings in the status line
+
+`lite configure claude`, `lite login --config-claude`, `lite up` and `lite autoroute up` also install a status line (`~/.litellm/statusline.py`, registered as `statusLine` in `~/.claude/settings.json` unless you already run one) that shows which model the auto-router actually served the last turn and, once the proxy has recorded the session, what the session cost against the router's savings baseline:
+
+```
+claude-auto · Routed to: claude-haiku-4-5  -63% vs Claude Opus 5
+LiteLLM       ████████░░░░░░░░░░░░░░░░  $0.14
+Claude Opus 5 ████████████████████████  $0.38
+```
+
+The routed model comes from Claude Code's own transcript, so it only names the tier model when the auto-router deployment sets `return_raw_model_name: true` (the `lite autoroute` wizard does); otherwise it shows the alias you requested. The cost lines come from `GET /auto_router/session?session_id=...`, which any virtual key may call for its own sessions, and are cached for five seconds under a per-user `$TMPDIR/litellm-statusline-<uid>` directory. The baseline is the priciest model in the router's hardest tier, the same counterfactual the auto-router's savings reports use. `lite unconfigure claude` removes the `statusLine` entry only while it still points at that script.
+
+`lite codex` registers the same script as a Codex `Stop` hook for the launch, so after each turn Codex prints the same block as a system message. Codex asks once to trust the hook; the answer is remembered for later launches.
+
 ### QA Complexity-Based Auto-Routing Against Your Real Proxy
 
 `lite autoroute` lets you try LiteLLM's complexity-based auto-routing -- picking a cheaper or more expensive model depending on how complex a prompt looks -- against models your key already has access to on your real, running proxy, without editing that proxy's `config.yaml` and without any real request ever bypassing it. It builds a second, throwaway proxy locally that forwards every request back to your real proxy, and points Claude Code at that local proxy for the duration of the session.

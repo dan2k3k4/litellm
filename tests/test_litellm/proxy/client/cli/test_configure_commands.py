@@ -302,11 +302,13 @@ class TestUnconfigureClaude:
         edited = json.loads(settings_path.read_text())
         edited["env"] = {key: f"{value}-edited" for key, value in edited["env"].items()}
         edited["model"] = "mine"
+        edited["statusLine"] = {"type": "command", "command": "~/.claude/my-statusline.sh"}
         settings_path.write_text(json.dumps(edited))
         result = runner.invoke(cli, ["unconfigure", "claude"])
         assert result.exit_code == 0, result.output
         assert "Nothing in" in result.output and "was still ours to restore" in result.output
         assert "Left as you changed them since:" in result.output and "model" in result.output
+        assert "statusLine" in result.output
 
     @responses.activate
     def test_names_the_server_a_withheld_credential_was_captured_with_and_keeps_the_receipt(self, runner, paths):

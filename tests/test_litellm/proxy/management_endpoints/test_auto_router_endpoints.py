@@ -844,6 +844,112 @@ from litellm.proxy.management_endpoints.auto_router_endpoints import (
 from litellm.types.management_endpoints.auto_router_endpoints import SHADOW_EVAL_TURN_VALVE, StartShadowEvalRequest
 
 VIEWER = UserAPIKeyAuth(user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY, api_key="sk-view", user_id="viewer")
+
+
+class TestAutoRouterSession:
+    """GET /auto_router/session: a key reads its own session's routed model and savings, nothing else."""
+
+    ROW = {
+        "router_name": "claude-auto",
+        "router_type": "complexity",
+        "turns": 3,
+        "last_model": "anthropic/claude-sonnet-5",
+        "spend": 0.14,
+        "saved_spend": 0.24,
+    }
+
+    @pytest.fixture(autouse=True)
+    def _pin_the_router_global(self, monkeypatch: pytest.MonkeyPatch):
+        from litellm.proxy import proxy_server
+
+        monkeypatch.setattr(proxy_server, "llm_router", None)
+
+    @staticmethod
+    def _rig(monkeypatch: pytest.MonkeyPatch, rows: Sequence[Mapping[str, object]], baseline: str | None):
+        from litellm.proxy import proxy_server
+        from litellm.router_strategy.savings_baseline import Baseline
+        from litellm.types.router import TaggedPreRoutingStrategy
+
+        queries: list[tuple[str, tuple[object, ...]]] = []
+
+        class _DB:
+            async def query_raw(self, sql: str, *params: object):
+                queries.append((sql, params))
+                return [row for row in rows if (row["api_key"], row["session_id"]) == params]
+
+        strategy = type("S", (), {"savings_baseline": Baseline(baseline) if baseline else None})()
+        registry = {"claude-auto": [TaggedPreRoutingStrategy(tags=(), strategy=strategy)]}
+        monkeypatch.setattr(proxy_server, "prisma_client", type("P", (), {"db": _DB()})())
+        monkeypatch.setattr(proxy_server, "llm_router", type("R", (), {"complexity_routers": registry})())
+        return queries
+
+    @pytest.mark.asyncio
+    async def test_a_key_reads_its_own_session_with_the_routers_baseline(self, monkeypatch: pytest.MonkeyPatch):
+        from litellm.proxy.management_endpoints.auto_router_endpoints import get_auto_router_session
+
+        caller = UserAPIKeyAuth(api_key="sk-caller")
+        self._rig(monkeypatch, [{**self.ROW, "api_key": caller.api_key, "session_id": "sess-1"}], "anthropic/claude-opus-5")
+        response = await get_auto_router_session(user_api_key_dict=caller, session_id="sess-1")
+        assert response.model_dump() == {
+            "session_id": "sess-1",
+            "router_name": "claude-auto",
+            "router_type": "complexity",
+            "turns": 3,
+            "last_model": "anthropic/claude-sonnet-5",
+            "spend": 0.14,
+            "saved_spend": 0.24,
+            "baseline_spend": pytest.approx(0.38),
+            "baseline_model": "anthropic/claude-opus-5",
+        }
+
+    @pytest.mark.asyncio
+    async def test_another_keys_session_is_a_404_even_for_an_admin(self, monkeypatch: pytest.MonkeyPatch):
+        # The scope is the caller's own key hash, exactly what the spend writer keyed the row under;
+        # an admin wanting every key's sessions has /auto_router/benchmarks.
+        from litellm.proxy.management_endpoints.auto_router_endpoints import get_auto_router_session
+
+        other = UserAPIKeyAuth(api_key="sk-other")
+        queries = self._rig(monkeypatch, [{**self.ROW, "api_key": other.api_key, "session_id": "sess-1"}], None)
+        with pytest.raises(HTTPException) as err:
+            await get_auto_router_session(user_api_key_dict=ADMIN, session_id="sess-1")
+        assert err.value.status_code == 404
+        assert queries == [(queries[0][0], (ADMIN.api_key, "sess-1"))]
+        assert ADMIN.api_key != "sk-test"
+
+    @pytest.mark.asyncio
+    async def test_a_router_no_longer_configured_still_reports_the_money_without_a_baseline_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from litellm.proxy.management_endpoints.auto_router_endpoints import get_auto_router_session
+
+        self._rig(monkeypatch, [{**self.ROW, "router_name": "gone", "api_key": ADMIN.api_key, "session_id": "s"}], None)
+        response = await get_auto_router_session(user_api_key_dict=ADMIN, session_id="s")
+        assert response.baseline_model is None
+        assert response.baseline_spend == pytest.approx(0.38)
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_client_session_id_is_bounded_like_the_writer_bounded_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from litellm.proxy.db.autorouter_session_rollup import bounded_session_id
+        from litellm.proxy.management_endpoints.auto_router_endpoints import get_auto_router_session
+
+        long_id = "s" * 300
+        self._rig(monkeypatch, [{**self.ROW, "api_key": ADMIN.api_key, "session_id": bounded_session_id(long_id)}], None)
+        response = await get_auto_router_session(user_api_key_dict=ADMIN, session_id=long_id)
+        assert response.session_id == long_id
+        assert response.turns == 3
+
+    @pytest.mark.asyncio
+    async def test_without_a_database_the_endpoint_says_so(self, monkeypatch: pytest.MonkeyPatch):
+        from litellm.proxy import proxy_server
+        from litellm.proxy.management_endpoints.auto_router_endpoints import get_auto_router_session
+
+        monkeypatch.setattr(proxy_server, "prisma_client", None)
+        with pytest.raises(HTTPException) as err:
+            await get_auto_router_session(user_api_key_dict=ADMIN, session_id="s")
+        assert err.value.status_code == 500
+
 NON_ADMIN = UserAPIKeyAuth(user_role=LitellmUserRoles.INTERNAL_USER, api_key="sk-user", user_id="user")
 
 

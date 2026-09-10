@@ -1,4 +1,6 @@
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,7 +15,12 @@ import requests
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .auth import CliContextObj, context_secret_vault, get_stored_api_key, login
-from .claude_settings import claude_settings_path, lite_api_key_helper_configured
+from .claude_settings import (
+    ClaudeSettingsError,
+    claude_settings_path,
+    install_statusline_script,
+    lite_api_key_helper_configured,
+)
 from .cmd_quoting import quote_for_cmd
 from .pi import (
     LITELLM_PROXY_API_KEY_ENV,
@@ -189,10 +196,59 @@ def prepare_pi(
     return ("--model", f"{PI_PROVIDER_NAME}/{ids[0]}")
 
 
+def _warn(message: str) -> None:
+    click.echo(message, err=True)
+
+
+_CODEX_STOP_HOOKS_DECLARED: Final = re.compile(
+    r"^\s*(\[\[\s*\"?hooks\"?\s*\.\s*\"?Stop\"?\s*\]\]|\"?hooks\"?(?:\s*\.\s*\"?Stop\"?)?\s*=|\[\s*\"?hooks\"?\s*\])",
+    re.MULTILINE,
+)
+
+
+def codex_config_path(base_env: Mapping[str, str]) -> Path:
+    return Path(base_env.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+
+
+def codex_declares_stop_hooks(config_path: Path) -> bool:
+    """Whether the user's own Codex config already carries Stop hooks (or a hooks table at all)."""
+    try:
+        return _CODEX_STOP_HOOKS_DECLARED.search(config_path.read_text(encoding="utf-8")) is not None
+    except OSError:
+        return False
+
+
+def prepare_codex(
+    base_url: str,
+    api_key: str,
+    base_env: Mapping[str, str],
+    *,
+    install: Callable[[], str] = install_statusline_script,
+    warn: Callable[[str], None] = _warn,
+) -> tuple[str, ...]:
+    """Register the Stop hook that reports the routed model and session cost after each turn.
+
+    Codex has no status line, so a Stop hook's systemMessage is where the auto-router's routed
+    model and savings can show. The hook rides in as a session flag rather than a config.toml
+    edit, so it lives exactly as long as this launch; Codex asks once to trust it and keys that
+    trust on the command, which is stable across launches. A session flag replaces the whole
+    `hooks.Stop` list, so when the user's own config already declares hooks the launch leaves
+    them alone and skips ours rather than silently dropping theirs.
+    """
+    if codex_declares_stop_hooks(codex_config_path(base_env)):
+        warn("litellm: your Codex config already declares hooks; not adding the routed-model Stop hook")
+        return ()
+    try:
+        command: Final = install()
+    except ClaudeSettingsError as e:
+        raise AgentRunError(str(e)) from e
+    return ("-c", f'hooks.Stop=[{{hooks=[{{type="command",command={json.dumps(command)}}}]}}]')
+
+
 _Preparer: TypeAlias = Callable[[str, str, Mapping[str, str]], Sequence[str]]
 
 _PREPARERS: Final[Mapping[str, _Preparer]] = MappingProxyType(
-    {"pi": prepare_pi}  # mutable-ok: MappingProxyType freezes the provider registry
+    {"pi": prepare_pi, "codex": prepare_codex}  # mutable-ok: MappingProxyType freezes the provider registry
 )
 
 
@@ -452,10 +508,6 @@ def _restore_controlling_terminal() -> None:
         os.dup2(fd, 0)
     finally:
         os.close(fd)
-
-
-def _warn(message: str) -> None:
-    click.echo(message, err=True)
 
 
 def run_agent(
